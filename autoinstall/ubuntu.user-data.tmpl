@@ -52,51 +52,38 @@ autoinstall:
 
   late-commands:
     # ---------------------------------------------------------------
-    # 1) Bring in the local .deb repo served by Cobbler, then install
-    #    usbguard + FreeIPA client fully offline.
+    # 1) Configure the package source (archive mirror OR bundled local repo,
+    #    decided at configure time) and pre-install the post-install packages
+    #    so first boot has them ready. Both sources are reachable over the LAN.
     # ---------------------------------------------------------------
-    - "install -d -m 0755 /target/opt/localdebs"
-    - "curl -fsSL http://__COBBLER_SERVER_IP__/localdebs/__RELEASE__/localdebs.tar.gz | tar xz -C /target/opt/localdebs"
-    - "echo 'deb [trusted=yes] file:/opt/localdebs ./' > /target/etc/apt/sources.list.d/localdebs.list"
+    - "curl -fsSL http://__COBBLER_SERVER_IP__/pituah/__RELEASE__/provision-sources.list -o /target/etc/apt/sources.list.d/provision.list"
     - curtin in-target -- apt-get -o Acquire::Languages=none update
-    - curtin in-target -- env DEBIAN_FRONTEND=noninteractive apt-get install -y usbguard freeipa-client sssd oddjob-mkhomedir
+    - curtin in-target -- env DEBIAN_FRONTEND=noninteractive apt-get install -y usbguard freeipa-client krb5-user sssd oddjob-mkhomedir openssh-server nfs-common cifs-utils chrony dos2unix
 
     # ---------------------------------------------------------------
-    # 2) usbguard: allow ONLY keyboards + mice (HID) and USB hubs; block the rest.
+    # 2) Drop the pituah post-install job + register a RUN-ONCE service that
+    #    executes it on FIRST BOOT (full network up), then disables itself.
+    #    The job does: hostname-from-serial, CA certs, NTP, FreeIPA join,
+    #    ansible user, CIFS mount, Trellix, and usbguard (kbd/mouse only).
     # ---------------------------------------------------------------
-    - "install -d -m 0755 /target/etc/usbguard"
+    - "curl -fsSL http://__COBBLER_SERVER_IP__/pituah/__RELEASE__/pituah-postinstall.sh -o /target/usr/local/sbin/pituah-postinstall.sh"
+    - "chmod 0750 /target/usr/local/sbin/pituah-postinstall.sh"
     - |
-      cat > /target/etc/usbguard/rules.conf <<'RULES'
-      # Allow USB hubs (required for the bus topology to function)
-      allow with-interface equals { 09:00:* }
-      # Allow Human Interface Devices — keyboards and mice (boot + report protocol)
-      allow with-interface one-of { 03:00:01 03:01:01 03:00:02 03:01:02 }
-      # Allow other HID interfaces (composite keyboard/mouse combos)
-      allow with-interface equals { 03:*:* }
-      # Block everything else (USB storage, network adapters, etc.)
-      block
-      RULES
-    - "chmod 0600 /target/etc/usbguard/rules.conf"
-    # Enforce the policy: implicitly block anything not matched above.
-    - "sed -i 's/^#\\?ImplicitPolicyTarget=.*/ImplicitPolicyTarget=block/' /target/etc/usbguard/usbguard-daemon.conf || true"
-    - curtin in-target -- systemctl enable usbguard
+      cat > /target/etc/systemd/system/pituah-postinstall.service <<'UNIT'
+      [Unit]
+      Description=Pituah first-boot post-install (domain join, usbguard, users)
+      After=network-online.target
+      Wants=network-online.target
+      ConditionPathExists=/usr/local/sbin/pituah-postinstall.sh
 
-    # ---------------------------------------------------------------
-    # 3) 'ansible' user: SSH-key login + passwordless sudo, password locked.
-    # ---------------------------------------------------------------
-    - curtin in-target -- useradd -m -s /bin/bash -G sudo __ANSIBLE_USER__
-    - "install -d -m 0700 /target/home/__ANSIBLE_USER__/.ssh"
-    - "printf '%s\\n' '__ANSIBLE_PUBKEY__' > /target/home/__ANSIBLE_USER__/.ssh/authorized_keys"
-    - "chmod 0600 /target/home/__ANSIBLE_USER__/.ssh/authorized_keys"
-    - curtin in-target -- chown -R __ANSIBLE_USER__:__ANSIBLE_USER__ /home/__ANSIBLE_USER__/.ssh
-    - "printf '__ANSIBLE_USER__ ALL=(ALL) NOPASSWD:ALL\\n' > /target/etc/sudoers.d/90-__ANSIBLE_USER__"
-    - "chmod 0440 /target/etc/sudoers.d/90-__ANSIBLE_USER__"
-    - curtin in-target -- passwd -l __ANSIBLE_USER__
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/pituah-postinstall.sh
+      RemainAfterExit=no
 
-    # ---------------------------------------------------------------
-    # 4) Join the FreeIPA domain (per-host one-time password).
-    # ---------------------------------------------------------------
-    - curtin in-target -- ipa-client-install --unattended --domain=__IPA_DOMAIN__ --realm=__IPA_REALM__ --server=__IPA_SERVER__ --password='__IPA_OTP__' --mkhomedir --no-ntp --force-join
-    - curtin in-target -- pam-auth-update --enable mkhomedir
+      [Install]
+      WantedBy=multi-user.target
+      UNIT
+    - curtin in-target -- systemctl enable pituah-postinstall.service
 
   shutdown: reboot

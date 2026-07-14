@@ -26,6 +26,19 @@ PUBKEY_FILE="$ROOT/config/ansible_id_ed25519.pub"
 LOCALADMIN_HASH="$(cat "$HASH_FILE")"
 ANSIBLE_PUBKEY="$(cat "$PUBKEY_FILE")"
 
+# Secrets prompted at install (root-only). Empty if the feature is disabled.
+IPA_PASSWORD="$(cat "$ROOT/config/ipa_join.secret" 2>/dev/null || echo "")"
+CIFS_PASSWORD="$(cat "$ROOT/config/cifs.secret" 2>/dev/null || echo "")"
+
+# Publish CA certs once (shared across releases), if provided.
+mkdir -p "$WWW/pituah/certs"
+for c in $CA_CERTS; do
+  [[ -f "$ROOT/certs/$c" ]] && cp -f "$ROOT/certs/$c" "$WWW/pituah/certs/$c"
+done
+
+# Escape a value for safe use as sed replacement text (handles \ & |).
+esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
+
 # release label|codename|iso pairs
 process_release() {
   local label="$1" code="$2" iso="$ROOT/isos/$3"
@@ -35,9 +48,21 @@ process_release() {
 
   [[ -f "$iso" ]] || { echo "  ISO not found: $iso — skipping"; return 0; }
 
-  # 1) Publish the local .deb repo for this release (served to late-commands).
-  mkdir -p "$WWW/localdebs/$code"
-  cp -f "$ROOT/localdebs/$code/localdebs.tar.gz" "$WWW/localdebs/$code/"
+  # 1) Decide the package source for this release and write provision-sources.list.
+  local prov="$WWW/pituah/$code"
+  mkdir -p "$prov"
+  if [[ "${PKG_SOURCE:-localdebs}" == "localdebs" ]]; then
+    echo "  package source: bundled local .deb repo (served over HTTP)"
+    mkdir -p "$WWW/localdebs/$code"
+    cp -f "$ROOT/localdebs/$code/localdebs.tar.gz" "$WWW/localdebs/$code/"
+    tar -xzf "$ROOT/localdebs/$code/localdebs.tar.gz" -C "$WWW/localdebs/$code/" 2>/dev/null || true
+    printf 'deb [trusted=yes] http://%s/localdebs/%s/ ./\n' "$COBBLER_SERVER_IP" "$code" \
+      > "$prov/provision-sources.list"
+  else
+    echo "  package source: your existing offline archive mirror"
+    printf '%s\n' "$ARCHIVE_APT_LINES" | sed "s/{RELEASE}/$code/g" \
+      > "$prov/provision-sources.list"
+  fi
 
   # 2) Publish the ISO and import it into Cobbler.
   mkdir -p "$WWW/isos"
@@ -66,6 +91,32 @@ process_release() {
       "$ROOT/autoinstall/ubuntu.user-data.tmpl" > "$auto_dir/user-data"
   sed -e "s|__INSTANCE_ID__|$label-base|g" \
       "$ROOT/autoinstall/meta-data.tmpl" > "$auto_dir/meta-data"
+
+  # 3b) Render + publish the pituah first-boot post-install job for this release.
+  local pit_dir="$WWW/pituah/$code"
+  mkdir -p "$pit_dir"
+  sed -e "s|__COBBLER_SERVER_IP__|$(esc "$COBBLER_SERVER_IP")|g" \
+      -e "s|__RELEASE__|$(esc "$code")|g" \
+      -e "s|__IPA_DOMAIN__|$(esc "$IPA_DOMAIN")|g" \
+      -e "s|__IPA_REALM__|$(esc "$IPA_REALM")|g" \
+      -e "s|__IPA_SERVER__|$(esc "$IPA_SERVER")|g" \
+      -e "s|__IPA_PRINCIPAL__|$(esc "$IPA_PRINCIPAL")|g" \
+      -e "s|__IPA_PASSWORD__|$(esc "$IPA_PASSWORD")|g" \
+      -e "s|__SECONDARY_DNS__|$(esc "$SECONDARY_DNS")|g" \
+      -e "s|__NTP_SERVER__|$(esc "$NTP_SERVER")|g" \
+      -e "s|__TIMEZONE__|$(esc "$TIMEZONE")|g" \
+      -e "s|__ANSIBLE_USER__|$(esc "$ANSIBLE_USER")|g" \
+      -e "s|__ANSIBLE_PUBKEY__|$(esc "$ANSIBLE_PUBKEY")|g" \
+      -e "s|__CA_CERTS__|$(esc "$CA_CERTS")|g" \
+      -e "s|__ENABLE_CIFS__|$(esc "$ENABLE_CIFS")|g" \
+      -e "s|__CIFS_UNC__|$(esc "$CIFS_UNC")|g" \
+      -e "s|__CIFS_MOUNTPOINT__|$(esc "$CIFS_MOUNTPOINT")|g" \
+      -e "s|__CIFS_USER__|$(esc "$CIFS_USER")|g" \
+      -e "s|__CIFS_PASSWORD__|$(esc "$CIFS_PASSWORD")|g" \
+      -e "s|__ENABLE_TRELLIX__|$(esc "$ENABLE_TRELLIX")|g" \
+      -e "s|__TRELLIX_SCRIPT__|$(esc "$TRELLIX_SCRIPT")|g" \
+      "$ROOT/autoinstall/pituah-postinstall.sh.tmpl" > "$pit_dir/pituah-postinstall.sh"
+  chmod 0644 "$pit_dir/pituah-postinstall.sh"
 
   # 4) Point the profile at the ISO + NoCloud autoinstall via kernel args.
   local ks_url="http://$COBBLER_SERVER_IP/autoinstall/$label/"

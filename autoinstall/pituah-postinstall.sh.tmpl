@@ -1,0 +1,147 @@
+#!/bin/bash
+# pituah-postinstall.sh.tmpl — templated from the site "pituah-linux.sh".
+#
+# 3-configure-cobbler.sh renders __PLACEHOLDERS__ from cobbler.env (+ prompted
+# secrets) and publishes the result over HTTP. The autoinstall installs it as a
+# run-once systemd service (pituah-postinstall.service) that executes on FIRST
+# BOOT of the deployed machine, then disables itself.
+#
+# Offline-aware: apt is pointed at the Cobbler-served local repo over the LAN
+# (http://__COBBLER_SERVER_IP__/localdebs/__RELEASE__/), so no internet is needed.
+set -x
+LOG=/var/log/pituah-postinstall.log
+exec > >(tee -a "$LOG") 2>&1
+echo "=== pituah post-install starting $(date) ==="
+
+COBBLER_IP="__COBBLER_SERVER_IP__"
+RELEASE="__RELEASE__"
+
+first_configuration() {
+    echo "Changing hostname from DMI serial..."
+    serial=$(cat /sys/class/dmi/id/product_serial 2>/dev/null || echo unknown)
+    lower_serial=${serial,,}
+    hn="ubuntu-${lower_serial}.__IPA_DOMAIN__"
+    hostnamectl set-hostname "$hn" || hostname "$hn"
+    echo "$hn" > /etc/hostname
+    echo "hostname set to $hn"
+
+    echo "Configuring the offline package source..."
+    curl -fsSL "http://${COBBLER_IP}/pituah/${RELEASE}/provision-sources.list" \
+        -o /etc/apt/sources.list.d/provision.list || true
+    # Neutralize any online sources so 'apt update' stays offline.
+    [ -f /etc/apt/sources.list ] && sed -i 's/^deb /#deb /' /etc/apt/sources.list
+    apt-get -o Acquire::Languages=none update || true
+
+    echo "Adding secondary DNS..."
+    echo 'nameserver __SECONDARY_DNS__' >> /etc/resolv.conf
+}
+
+update_ca_crt() {
+    echo "Installing trusted CA certificates..."
+    cd /usr/local/share/ca-certificates/ || return 0
+    for c in __CA_CERTS__; do
+        curl -fsSL "http://${COBBLER_IP}/pituah/certs/${c}" -o "$c" || \
+            echo "  (warn) could not fetch CA $c"
+    done
+    update-ca-certificates || true
+}
+
+sync_ntp() {
+    echo "Setting timezone + NTP..."
+    timedatectl set-timezone __TIMEZONE__ || true
+    echo "NTP=__NTP_SERVER__" >> /etc/systemd/timesyncd.conf
+    systemctl restart systemd-timesyncd 2>/dev/null || true
+    date
+}
+
+install_required_packages() {
+    echo "Ensuring required packages are present (offline)..."
+    echo "krb5-user krb5-config/default_realm string __IPA_REALM__" | debconf-set-selections
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        freeipa-client krb5-user openssh-server nfs-common cifs-utils chrony usbguard dos2unix || \
+        echo "  (warn) some packages may already be installed or missing from the local repo"
+}
+
+join_domain() {
+    echo "Joining FreeIPA domain __IPA_DOMAIN__ ..."
+    ipa-client-install \
+        --domain=__IPA_DOMAIN__ \
+        --server=__IPA_SERVER__ \
+        --realm=__IPA_REALM__ \
+        --principal=__IPA_PRINCIPAL__ \
+        --password='__IPA_PASSWORD__' \
+        --mkhomedir \
+        --ntp-server=__NTP_SERVER__ \
+        --unattended --force-join
+}
+
+create_ansible_user() {
+    echo "Creating ansible user with SSH key + passwordless sudo..."
+    id -u __ANSIBLE_USER__ >/dev/null 2>&1 || useradd -m -s /bin/bash -G sudo __ANSIBLE_USER__
+    install -d -m 0700 /home/__ANSIBLE_USER__/.ssh
+    cat > /home/__ANSIBLE_USER__/.ssh/authorized_keys <<'PUBKEY'
+__ANSIBLE_PUBKEY__
+PUBKEY
+    chmod 0600 /home/__ANSIBLE_USER__/.ssh/authorized_keys
+    chown -R __ANSIBLE_USER__:__ANSIBLE_USER__ /home/__ANSIBLE_USER__/.ssh
+    echo '__ANSIBLE_USER__ ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-__ANSIBLE_USER__
+    chmod 0440 /etc/sudoers.d/90-__ANSIBLE_USER__
+    passwd -l __ANSIBLE_USER__
+}
+
+mount_shared_drive() {
+    [ "__ENABLE_CIFS__" = "1" ] || { echo "CIFS disabled, skipping."; return 0; }
+    echo "Mounting shared drive..."
+    mkdir -p "__CIFS_MOUNTPOINT__"
+    echo "__CIFS_UNC__ __CIFS_MOUNTPOINT__ cifs vers=2.1,username=__CIFS_USER__,password=__CIFS_PASSWORD__,uid=1000,gid=1000 0 0" >> /etc/fstab
+    mount -a || echo "  (warn) CIFS mount failed"
+}
+
+trigger_trellix_smart_install() {
+    [ "__ENABLE_TRELLIX__" = "1" ] || { echo "Trellix disabled, skipping."; return 0; }
+    echo "Triggering Trellix smart install..."
+    src="__TRELLIX_SCRIPT__"
+    [ -f "$src" ] || { echo "  (warn) Trellix script not found at $src"; return 0; }
+    cp "$src" /mnt/TrellixSmartInstall.sh
+    dos2unix /mnt/TrellixSmartInstall.sh
+    chmod 0755 /mnt/TrellixSmartInstall.sh
+    /mnt/TrellixSmartInstall.sh && echo "Trellix OK" || echo "  (warn) Trellix install failed"
+    rm -f /mnt/TrellixSmartInstall.sh
+}
+
+install_usb_guard() {
+    echo "Configuring usbguard: allow only keyboards + mice (HID) and hubs..."
+    cat > /etc/usbguard/rules.conf <<'RULES'
+# Allow USB hubs (required for the bus topology)
+allow with-interface equals { 09:00:* }
+# Allow Human Interface Devices — keyboards and mice
+allow with-interface equals { 03:*:* }
+# Block everything else (storage, network, etc.)
+block
+RULES
+    chmod 0600 /etc/usbguard/rules.conf
+    sed -i 's/^#\?ImplicitPolicyTarget=.*/ImplicitPolicyTarget=block/' \
+        /etc/usbguard/usbguard-daemon.conf 2>/dev/null || true
+    systemctl enable usbguard
+    systemctl restart usbguard || systemctl start usbguard
+    echo "usbguard configured."
+}
+
+self_disable() {
+    echo "Disabling the run-once post-install service..."
+    systemctl disable pituah-postinstall.service 2>/dev/null || true
+    rm -f /etc/systemd/system/pituah-postinstall.service
+}
+
+## ---- Main ----
+first_configuration
+update_ca_crt
+sync_ntp
+install_required_packages
+create_ansible_user
+join_domain
+mount_shared_drive
+trigger_trellix_smart_install
+install_usb_guard
+self_disable
+echo "=== pituah post-install complete $(date) ==="

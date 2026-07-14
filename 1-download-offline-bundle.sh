@@ -36,31 +36,31 @@ need debootstrap debootstrap
 need dpkg-scanpackages dpkg-dev
 need pip3 python3-pip
 
-# System dependencies Cobbler needs on the offline Ubuntu server (per Cobbler docs).
-COBBLER_SYS_DEPS="apache2 apache2-dev libapache2-mod-wsgi-py3 tftpd-hpa rsync xorriso \
-  createrepo-c dosfstools mtools syslinux syslinux-common pxelinux grub-common \
-  grub-pc-bin grub-efi-amd64-bin python3 python3-pip python3-dev python3-cheetah \
-  python3-dnspython python3-netaddr python3-requests python3-distro python3-schema \
-  python3-yaml python3-gunicorn python3-magic build-essential libldap2-dev libsasl2-dev \
-  libsystemd-dev pkg-config"
+# System dependencies Cobbler needs on the offline Ubuntu server come from
+# $COBBLER_SYS_DEPS (defined in config/cobbler.env).
 
 echo "=============================================================="
 echo " STEP 1/4 — Cobbler SERVER: apt .debs + pip wheelhouse"
 echo "=============================================================="
 sudo apt-get update
-echo "  - downloading Cobbler system-dependency .debs (with recursive deps)"
-# APT::Sandbox::User=root keeps apt from dropping to the '_apt' user, which
-# cannot read files under /root (the cause of the 'Permission denied' warnings).
-for pkg in $COBBLER_SYS_DEPS; do
-  sudo apt-get install -y --download-only \
-    -o APT::Sandbox::User=root \
-    -o Dir::Cache::archives="$SRV_DIR/apt-debs" "$pkg" || \
-    echo "    (warn) could not fully resolve $pkg"
-done
-sudo chown -R "$USER:$USER" "$SRV_DIR/apt-debs" 2>/dev/null || true
-( cd "$SRV_DIR/apt-debs" && dpkg-scanpackages . /dev/null > Packages && gzip -kf Packages )
+if [[ "${COBBLER_DEPS_SOURCE:-bundle}" == "bundle" ]]; then
+  echo "  - downloading Cobbler system-dependency .debs (with recursive deps)"
+  # APT::Sandbox::User=root keeps apt from dropping to the '_apt' user, which
+  # cannot read files under /root (the cause of the 'Permission denied' warnings).
+  for pkg in $COBBLER_SYS_DEPS; do
+    sudo apt-get install -y --download-only \
+      -o APT::Sandbox::User=root \
+      -o Dir::Cache::archives="$SRV_DIR/apt-debs" "$pkg" || \
+      echo "    (warn) could not fully resolve $pkg"
+  done
+  sudo chown -R "$USER:$USER" "$SRV_DIR/apt-debs" 2>/dev/null || true
+  ( cd "$SRV_DIR/apt-debs" && dpkg-scanpackages . /dev/null > Packages && gzip -kf Packages )
+else
+  echo "  - COBBLER_DEPS_SOURCE=$COBBLER_DEPS_SOURCE — system deps will come from"
+  echo "    your archive mirror on the offline server; not bundling .debs."
+fi
 
-echo "  - building Cobbler pip wheelhouse"
+echo "  - building Cobbler pip wheelhouse (ALWAYS — not in any Ubuntu mirror)"
 # Cobbler depends on the 'mod-wsgi' PyPI package, which COMPILES against Apache
 # (needs apxs from apache2-dev). 'python-ldap' also compiles and needs the SASL +
 # OpenLDAP + SSL dev headers. Install these here and BUILD wheels (pip wheel) so
@@ -71,6 +71,10 @@ pip3 wheel cobbler -w "$SRV_DIR/wheelhouse"
 echo "=============================================================="
 echo " STEP 2/4 — Per-release post-install package repos (debootstrap)"
 echo "=============================================================="
+if [[ "${PKG_SOURCE:-localdebs}" != "localdebs" ]]; then
+  echo "  PKG_SOURCE=$PKG_SOURCE — using your existing offline apt mirror."
+  echo "  Skipping debootstrap / local .deb repo build."
+else
 for code in $TARGET_CODENAMES; do
   echo "  --- $code ---"
   CHROOT="$WORKDIR/chroot-$code"
@@ -101,6 +105,7 @@ for code in $TARGET_CODENAMES; do
       $(cd "$code" && ls | grep -vE '^localdebs.tar.gz$') )
   echo "    -> $OUT ($(ls "$OUT"/*.deb 2>/dev/null | wc -l) debs)"
 done
+fi
 
 echo "=============================================================="
 echo " STEP 3/4 — Download Ubuntu live-server ISOs"
@@ -124,9 +129,12 @@ echo "=============================================================="
 cp -r "$ROOT/config" "$ROOT/autoinstall" "$ROOT/scripts" \
       "$ROOT/2-install-offline.sh" "$ROOT/3-configure-cobbler.sh" \
       "$ROOT/verify-bundle.sh" "$ROOT/README.md" "$WORKDIR/"
+# CA certs for the pituah post-install (optional — create empty dir if absent).
+mkdir -p "$WORKDIR/certs"
+[[ -d "$ROOT/certs" ]] && cp -r "$ROOT/certs/." "$WORKDIR/certs/" 2>/dev/null || true
 
 tar -C "$WORKDIR" -czf "$BUNDLE" \
-  cobbler-server localdebs isos config autoinstall scripts \
+  cobbler-server localdebs isos config autoinstall scripts certs \
   2-install-offline.sh 3-configure-cobbler.sh verify-bundle.sh README.md
 
 echo

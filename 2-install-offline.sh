@@ -15,13 +15,21 @@ source "$ROOT/config/cobbler.env"
 if [[ $EUID -ne 0 ]]; then echo "Run as root: sudo $0" >&2; exit 1; fi
 
 echo "=============================================================="
-echo " STEP 1/5 — Install Cobbler system dependencies (offline apt)"
+echo " STEP 1/5 — Install Cobbler system dependencies"
 echo "=============================================================="
-# Install every bundled .deb; apt resolves order/deps from the local files.
-apt-get install -y --no-download "$ROOT"/cobbler-server/apt-debs/*.deb 2>/dev/null || \
-  dpkg -i "$ROOT"/cobbler-server/apt-debs/*.deb || true
-# Second pass fixes any ordering issues using only local files (no network).
-dpkg -i "$ROOT"/cobbler-server/apt-debs/*.deb 2>/dev/null || true
+if [[ "${COBBLER_DEPS_SOURCE:-bundle}" == "archive" ]]; then
+  echo "  - installing system deps from your archive mirror (apt)"
+  echo "    (the server's apt must already point at your offline mirror)"
+  apt-get update
+  apt-get install -y $COBBLER_SYS_DEPS
+else
+  echo "  - installing system deps from the bundled .debs (offline)"
+  # Install every bundled .deb; apt resolves order/deps from the local files.
+  apt-get install -y --no-download "$ROOT"/cobbler-server/apt-debs/*.deb 2>/dev/null || \
+    dpkg -i "$ROOT"/cobbler-server/apt-debs/*.deb || true
+  # Second pass fixes any ordering issues using only local files (no network).
+  dpkg -i "$ROOT"/cobbler-server/apt-debs/*.deb 2>/dev/null || true
+fi
 
 echo "=============================================================="
 echo " STEP 2/5 — Install Cobbler from the pip wheelhouse (offline)"
@@ -71,6 +79,24 @@ fi
 umask 077
 printf '%s\n' "$HASH" > "$HASH_FILE"
 echo "  - stored SHA-512 hash in $HASH_FILE (no plaintext kept)"
+
+# FreeIPA enrollment password (used by the pituah first-boot join). Stored
+# root-only; it is injected into the published post-install script by step 3.
+echo
+read -rs -p "Enter FreeIPA enrollment password for principal '$IPA_PRINCIPAL': " IPA_PW; echo
+printf '%s' "$IPA_PW" > "$ROOT/config/ipa_join.secret"
+chmod 600 "$ROOT/config/ipa_join.secret"
+unset IPA_PW
+echo "  - stored FreeIPA join secret (root-only)"
+
+# CIFS password (only if the share mount is enabled).
+if [[ "${ENABLE_CIFS:-0}" == "1" ]]; then
+  read -rs -p "Enter CIFS password for user '$CIFS_USER': " CIFS_PW; echo
+  printf '%s' "$CIFS_PW" > "$ROOT/config/cifs.secret"
+  chmod 600 "$ROOT/config/cifs.secret"
+  unset CIFS_PW
+  echo "  - stored CIFS secret (root-only)"
+fi
 
 echo "=============================================================="
 echo " STEP 5/5 — Generate the ansible SSH keypair"
