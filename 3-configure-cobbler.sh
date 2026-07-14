@@ -18,6 +18,8 @@ if [[ $EUID -ne 0 ]]; then echo "Run as root: sudo $0" >&2; exit 1; fi
 
 # Defaults for optional settings so 'set -u' (nounset) never trips on a var that
 # is missing from a hand-edited cobbler.env.
+: "${COBBLER_SERVER_IP:=10.0.0.10}"
+: "${LOCALADMIN_USER:=localadmin}"
 : "${PKG_SOURCE:=localdebs}"
 : "${COBBLER_DEPS_SOURCE:=bundle}"
 : "${ARCHIVE_APT_LINES:=}"

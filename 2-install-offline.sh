@@ -51,15 +51,37 @@ fi
 # environment anyway (Cobbler needs system-wide access like its distro packages).
 pip3 install --no-index --find-links "$ROOT/cobbler-server/wheelhouse" \
   --break-system-packages cobbler
-# Lay down Cobbler's config/service files.
-cobblerd setup 2>/dev/null || true
+
+# pip installs Cobbler's config/data as "data files" UNDER the package prefix
+# (e.g. /usr/local/lib/python3.12/dist-packages/etc/cobbler) instead of the real
+# FHS paths. Relocate them so /etc/cobbler, /var/lib/cobbler, etc. exist.
+echo "  - relocating Cobbler config/data from the pip prefix to / ..."
+BASE="$(python3 -c 'import cobbler,os;print(os.path.dirname(os.path.dirname(cobbler.__file__)))')"
+echo "    package prefix: $BASE"
+mkdir -p /etc/cobbler
+[ -d "$BASE/etc/cobbler" ]     && cp -a "$BASE/etc/cobbler/." /etc/cobbler/
+[ -d "$BASE/var/lib/cobbler" ] && cp -a "$BASE/var/lib/cobbler" /var/lib/
+[ -d "$BASE/var/log/cobbler" ] && cp -a "$BASE/var/log/cobbler" /var/log/
+[ -d "$BASE/var/www/cobbler" ] && cp -a "$BASE/var/www/cobbler" /var/www/
+[ -d "$BASE/usr/share/cobbler" ] && cp -a "$BASE/usr/share/cobbler" /usr/share/
+[ -d "$BASE/share/cobbler" ]   && cp -a "$BASE/share/cobbler" /usr/share/
+find "$BASE" -name 'cobblerd*.service' -exec cp {} /etc/systemd/system/ \; 2>/dev/null || true
+find "$BASE" -path '*apache2*' -name 'cobbler*.conf' -exec cp {} /etc/apache2/conf-available/ \; 2>/dev/null || true
+
+if [[ ! -f /etc/cobbler/settings.yaml ]]; then
+  echo "ERROR: /etc/cobbler/settings.yaml still missing after relocation." >&2
+  echo "       Inspect: find $BASE -name settings.yaml" >&2
+  exit 1
+fi
+echo "  - /etc/cobbler/settings.yaml is in place."
 
 echo "=============================================================="
 echo " STEP 3/5 — Enable services (Apache proxy, TFTP, Cobbler)"
 echo "=============================================================="
 a2enmod proxy proxy_http rewrite 2>/dev/null || true
+a2enconf cobbler 2>/dev/null || true
 systemctl enable --now apache2 tftpd-hpa 2>/dev/null || true
-# Cobbler ships cobblerd + gunicorn services via 'cobblerd setup'.
+# Cobbler ships cobblerd + gunicorn services (relocated above).
 systemctl daemon-reload
 systemctl enable --now cobblerd 2>/dev/null || true
 
