@@ -34,7 +34,23 @@ fi
 echo "=============================================================="
 echo " STEP 2/5 — Install Cobbler from the pip wheelhouse (offline)"
 echo "=============================================================="
-pip3 install --no-index --find-links "$ROOT/cobbler-server/wheelhouse" cobbler
+# The compiled wheels (mod_wsgi, python-ldap, Cheetah3) are ABI-specific. If this
+# server's Python differs from the build machine's, pip fails with a confusing
+# "No matching distribution found for mod-wsgi". Check up front for a clear error.
+BUILD_PY="$(cat "$ROOT/cobbler-server/wheelhouse/BUILD_PYTHON.txt" 2>/dev/null | grep -oE '3\.[0-9]+' | head -1)"
+THIS_PY="$(python3 --version 2>&1 | grep -oE '3\.[0-9]+' | head -1)"
+if [[ -n "$BUILD_PY" && "$BUILD_PY" != "$THIS_PY" ]]; then
+  echo "ERROR: wheelhouse was built for Python $BUILD_PY but this server has $THIS_PY." >&2
+  echo "       The compiled wheels (mod_wsgi/python-ldap/Cheetah3) won't match." >&2
+  echo "       Rebuild the bundle on an Ubuntu release whose Python is $THIS_PY," >&2
+  echo "       or install Cobbler on an Ubuntu release with Python $BUILD_PY." >&2
+  exit 1
+fi
+# Ubuntu 24.04 marks system Python 'externally managed' (PEP 668), which blocks
+# pip installs by default. --break-system-packages installs into the system
+# environment anyway (Cobbler needs system-wide access like its distro packages).
+pip3 install --no-index --find-links "$ROOT/cobbler-server/wheelhouse" \
+  --break-system-packages cobbler
 # Lay down Cobbler's config/service files.
 cobblerd setup 2>/dev/null || true
 

@@ -68,6 +68,19 @@ echo "  - building Cobbler pip wheelhouse (ALWAYS — not in any Ubuntu mirror)"
 sudo apt-get install -y apache2-dev libsasl2-dev libldap2-dev libssl-dev
 pip3 wheel cobbler -w "$SRV_DIR/wheelhouse"
 
+# The compiled wheels (mod_wsgi, python-ldap, Cheetah3) are ABI-specific to THIS
+# Python. The offline server MUST run the same Python/Ubuntu release or pip will
+# say "No matching distribution found for mod-wsgi". Assert + record the version.
+python3 --version | tee "$SRV_DIR/wheelhouse/BUILD_PYTHON.txt"
+for w in mod_wsgi python_ldap Cheetah3; do
+  if ! ls "$SRV_DIR/wheelhouse/"*.whl 2>/dev/null | grep -qiE "${w//_/[-_]}"; then
+    echo "  ERROR: compiled wheel for '$w' is MISSING from the wheelhouse." >&2
+    echo "         The offline pip install will fail. Re-check the build above." >&2
+    exit 1
+  fi
+done
+echo "  - wheelhouse OK (mod_wsgi, python-ldap, Cheetah3 present; built for $(cat "$SRV_DIR/wheelhouse/BUILD_PYTHON.txt"))"
+
 echo "=============================================================="
 echo " STEP 2/4 — Per-release post-install package repos (debootstrap)"
 echo "=============================================================="

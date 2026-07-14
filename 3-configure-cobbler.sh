@@ -16,6 +16,31 @@ source "$ROOT/config/cobbler.env"
 
 if [[ $EUID -ne 0 ]]; then echo "Run as root: sudo $0" >&2; exit 1; fi
 
+# Defaults for optional settings so 'set -u' (nounset) never trips on a var that
+# is missing from a hand-edited cobbler.env.
+: "${PKG_SOURCE:=localdebs}"
+: "${COBBLER_DEPS_SOURCE:=bundle}"
+: "${ARCHIVE_APT_LINES:=}"
+: "${IPA_DOMAIN:=example.com}"
+: "${IPA_REALM:=EXAMPLE.COM}"
+: "${IPA_SERVER:=ipa.example.com}"
+: "${IPA_PRINCIPAL:=admin}"
+: "${SECONDARY_DNS:=}"
+: "${NTP_SERVER:=}"
+: "${TIMEZONE:=UTC}"
+: "${ANSIBLE_USER:=ansible}"
+: "${CA_CERTS:=}"
+: "${ENABLE_CIFS:=0}"
+: "${CIFS_UNC:=}"
+: "${CIFS_MOUNTPOINT:=}"
+: "${CIFS_USER:=}"
+: "${ENABLE_TRELLIX:=0}"
+: "${TRELLIX_SCRIPT:=}"
+: "${UBUNTU_2204_LABEL:=}"
+: "${UBUNTU_2204_CODENAME:=}"
+: "${UBUNTU_NOBLE_LABEL:=}"
+: "${UBUNTU_NOBLE_CODENAME:=}"
+
 WWW="/var/www/html"
 HASH_FILE="$ROOT/config/localadmin.hash"
 PUBKEY_FILE="$ROOT/config/ansible_id_ed25519.pub"
@@ -43,9 +68,10 @@ esc() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
 process_release() {
   local label="$1" code="$2" iso="$ROOT/isos/$3"
   echo "=============================================================="
-  echo " Release: $label ($code)"
+  echo " Release: ${label:-<unset>} (${code:-<unset>})"
   echo "=============================================================="
 
+  [[ -n "$label" && -n "$code" ]] || { echo "  release not configured — skipping"; return 0; }
   [[ -f "$iso" ]] || { echo "  ISO not found: $iso — skipping"; return 0; }
 
   # 1) Decide the package source for this release and write provision-sources.list.
