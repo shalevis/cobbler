@@ -105,11 +105,14 @@ done
 echo "=============================================================="
 echo " STEP 3/4 — Download Ubuntu live-server ISOs"
 echo "=============================================================="
-fetch() {  # $1 url  $2 dest
-  if [[ -s "$2" ]]; then echo "    already present: $(basename "$2")"; return 0; fi
-  echo "    downloading $(basename "$2")"
-  if command -v curl >/dev/null 2>&1; then curl -fL --retry 3 -C - -o "$2" "$1"
-  else wget -c -O "$2" "$1"; fi
+fetch() { 
+
+  if [[ -s "$2" ]]; then echo "    already present: $(basename "$2")"; return 0; fi 
+
+  echo "    downloading $(basename "$2")" 
+
+  wget -c --tries=15 --retry-connrefused --waitretry=5 -O "$2" "$1" 
+
 }
 fetch "$UBUNTU_2204_ISO_URL"  "$ISO_DIR/$UBUNTU_2204_LABEL.iso"
 fetch "$UBUNTU_NOBLE_ISO_URL" "$ISO_DIR/$UBUNTU_NOBLE_LABEL.iso"
