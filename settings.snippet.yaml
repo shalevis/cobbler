@@ -1,0 +1,51 @@
+# Merge these keys into /etc/cobbler/settings.yaml, then: sudo systemctl restart cobblerd
+# Replace <SERVER_IP> with the IP of this Cobbler/PXE server.
+#
+# NOTE: This config assumes you ALREADY have DHCP + DNS on your network.
+# Cobbler therefore does NOT manage DHCP or DNS — it only serves TFTP + HTTP.
+# You must add PXE options to your EXISTING DHCP server (see README / notes below).
+
+# This server's address (used to build repo + autoinstall URLs handed to clients)
+server: <SERVER_IP>
+
+# Address announced to PXE clients as the TFTP/boot server.
+# Since your DHCP is external, also set this in your DHCP server (next-server).
+next_server_v4: <SERVER_IP>
+
+# Do NOT let Cobbler manage DHCP — you already run your own DHCP server.
+manage_dhcp: 0
+manage_dhcp_v4: 0
+
+# Do NOT let Cobbler manage DNS — you already run your own DNS server.
+manage_dns: 0
+
+# Cobbler DOES manage TFTP (serves the PXE boot loaders + menus).
+manage_tftpd: 1
+
+# Serve autoinstall files + repos over HTTP (Apache).
+manage_rsync: 0
+
+# Boot loaders (needed for both BIOS and UEFI PXE clients)
+bootloaders_dir: "/var/lib/cobbler/loaders"
+grubconfig_dir: "/var/lib/cobbler/grub_config"
+
+# ---------------------------------------------------------------------------
+# Configure your EXISTING DHCP server (ISC dhcpd example) to hand PXE clients
+# the correct boot file. You need to distinguish BIOS vs UEFI clients:
+#
+#   option arch code 93 = unsigned integer 16;   # RFC 4578 client arch
+#
+#   next-server <SERVER_IP>;                      # = this Cobbler/TFTP box
+#
+#   if option arch = 00:07 or option arch = 00:09 {
+#       filename "grub/grubx64.efi";              # UEFI x86_64
+#   } else {
+#       filename "pxelinux.0";                    # legacy BIOS
+#   }
+#
+# (Windows DHCP: set 066 Boot Server Host Name = <SERVER_IP>, and
+#  067 Bootfile Name = pxelinux.0 for BIOS or grub/grubx64.efi for UEFI,
+#  ideally via DHCP policies that match the client architecture.)
+# ---------------------------------------------------------------------------
+#
+# After any change: sudo systemctl restart cobblerd && sudo cobbler sync

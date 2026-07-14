@@ -1,0 +1,102 @@
+#cloud-config
+# ubuntu.user-data.tmpl — Ubuntu autoinstall (subiquity) TEMPLATE.
+#
+# 3-configure-cobbler.sh renders this into a per-release file by replacing the
+# __PLACEHOLDERS__ from cobbler.env + install-time values. new-host.sh then
+# stamps per-machine values (hostname + FreeIPA OTP).
+#
+# What each deployed machine gets:
+#   * usbguard installed with rules that allow ONLY keyboards + mice (HID) and hubs
+#   * enrolled into the FreeIPA domain
+#   * an 'ansible' user with SSH-key login + passwordless sudo (for playbooks)
+#   * a local admin user with sudo/root (break-glass, password prompted at install)
+#
+# Offline notes:
+#   * apt.fallback=offline-install makes subiquity use the ISO's package pool
+#     when no internet mirror is reachable (so the base install works air-gapped).
+#   * usbguard + freeipa-client come from the LOCAL apt repo served by Cobbler
+#     (installed in late-commands), because they're not on the live-server ISO.
+
+autoinstall:
+  version: 1
+
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+
+  network:
+    version: 2
+    ethernets:
+      any:
+        match:
+          name: "e*"
+        dhcp4: true
+
+  # Air-gapped: fall back to the ISO pool instead of hanging on a network mirror.
+  apt:
+    fallback: offline-install
+    geoip: false
+
+  # Local admin (primary user). Password is a SHA-512 crypt hash injected at install.
+  identity:
+    hostname: __HOSTNAME__
+    username: __LOCALADMIN_USER__
+    password: "__LOCALADMIN_HASH__"
+
+  ssh:
+    install-server: true
+    allow-pw: false
+
+  # Extra packages are installed from the local repo in late-commands (offline),
+  # so we intentionally do NOT list them here (avoids a network apt fetch).
+
+  late-commands:
+    # ---------------------------------------------------------------
+    # 1) Bring in the local .deb repo served by Cobbler, then install
+    #    usbguard + FreeIPA client fully offline.
+    # ---------------------------------------------------------------
+    - "install -d -m 0755 /target/opt/localdebs"
+    - "curl -fsSL http://__COBBLER_SERVER_IP__/localdebs/__RELEASE__/localdebs.tar.gz | tar xz -C /target/opt/localdebs"
+    - "echo 'deb [trusted=yes] file:/opt/localdebs ./' > /target/etc/apt/sources.list.d/localdebs.list"
+    - curtin in-target -- apt-get -o Acquire::Languages=none update
+    - curtin in-target -- env DEBIAN_FRONTEND=noninteractive apt-get install -y usbguard freeipa-client sssd oddjob-mkhomedir
+
+    # ---------------------------------------------------------------
+    # 2) usbguard: allow ONLY keyboards + mice (HID) and USB hubs; block the rest.
+    # ---------------------------------------------------------------
+    - "install -d -m 0755 /target/etc/usbguard"
+    - |
+      cat > /target/etc/usbguard/rules.conf <<'RULES'
+      # Allow USB hubs (required for the bus topology to function)
+      allow with-interface equals { 09:00:* }
+      # Allow Human Interface Devices — keyboards and mice (boot + report protocol)
+      allow with-interface one-of { 03:00:01 03:01:01 03:00:02 03:01:02 }
+      # Allow other HID interfaces (composite keyboard/mouse combos)
+      allow with-interface equals { 03:*:* }
+      # Block everything else (USB storage, network adapters, etc.)
+      block
+      RULES
+    - "chmod 0600 /target/etc/usbguard/rules.conf"
+    # Enforce the policy: implicitly block anything not matched above.
+    - "sed -i 's/^#\\?ImplicitPolicyTarget=.*/ImplicitPolicyTarget=block/' /target/etc/usbguard/usbguard-daemon.conf || true"
+    - curtin in-target -- systemctl enable usbguard
+
+    # ---------------------------------------------------------------
+    # 3) 'ansible' user: SSH-key login + passwordless sudo, password locked.
+    # ---------------------------------------------------------------
+    - curtin in-target -- useradd -m -s /bin/bash -G sudo __ANSIBLE_USER__
+    - "install -d -m 0700 /target/home/__ANSIBLE_USER__/.ssh"
+    - "printf '%s\\n' '__ANSIBLE_PUBKEY__' > /target/home/__ANSIBLE_USER__/.ssh/authorized_keys"
+    - "chmod 0600 /target/home/__ANSIBLE_USER__/.ssh/authorized_keys"
+    - curtin in-target -- chown -R __ANSIBLE_USER__:__ANSIBLE_USER__ /home/__ANSIBLE_USER__/.ssh
+    - "printf '__ANSIBLE_USER__ ALL=(ALL) NOPASSWD:ALL\\n' > /target/etc/sudoers.d/90-__ANSIBLE_USER__"
+    - "chmod 0440 /target/etc/sudoers.d/90-__ANSIBLE_USER__"
+    - curtin in-target -- passwd -l __ANSIBLE_USER__
+
+    # ---------------------------------------------------------------
+    # 4) Join the FreeIPA domain (per-host one-time password).
+    # ---------------------------------------------------------------
+    - curtin in-target -- ipa-client-install --unattended --domain=__IPA_DOMAIN__ --realm=__IPA_REALM__ --server=__IPA_SERVER__ --password='__IPA_OTP__' --mkhomedir --no-ntp --force-join
+    - curtin in-target -- pam-auth-update --enable mkhomedir
+
+  shutdown: reboot
