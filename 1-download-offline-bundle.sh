@@ -123,14 +123,21 @@ fi
 echo "=============================================================="
 echo " STEP 3/4 — Download Ubuntu live-server ISOs"
 echo "=============================================================="
-fetch() { 
-
-  if [[ -s "$2" ]]; then echo "    already present: $(basename "$2")"; return 0; fi 
-
-  echo "    downloading $(basename "$2")" 
-
-  wget -c --tries=15 --retry-connrefused --waitretry=5 -O "$2" "$1" 
-
+fetch() {  # $1 = url, $2 = dest
+  echo "    fetching $(basename "$2")"
+  # -c resumes/completes a partial file; a no-op if already complete. Never skip
+  # just because the file exists — a truncated ISO would be silently kept.
+  wget -c --tries=0 --retry-connrefused --waitretry=5 -O "$2" "$1" || true
+  # Verify the local size matches the server's Content-Length (catches truncation).
+  local remote local_sz
+  remote="$(wget --spider -S "$1" 2>&1 | awk '/[Cc]ontent-[Ll]ength:/{print $2}' | tail -1 | tr -d '\r')"
+  local_sz="$(stat -c%s "$2" 2>/dev/null || echo 0)"
+  if [[ "$remote" =~ ^[0-9]+$ && "$local_sz" -lt "$remote" ]]; then
+    echo "    WARNING: $(basename "$2") is $local_sz bytes but server reports $remote — INCOMPLETE." >&2
+    echo "             Re-run this script to resume/finish the download." >&2
+  else
+    echo "    OK: $(basename "$2") — $(numfmt --to=iec "$local_sz" 2>/dev/null || echo "$local_sz bytes")"
+  fi
 }
 fetch "$UBUNTU_2204_ISO_URL"  "$ISO_DIR/$UBUNTU_2204_LABEL.iso"
 fetch "$UBUNTU_NOBLE_ISO_URL" "$ISO_DIR/$UBUNTU_NOBLE_LABEL.iso"

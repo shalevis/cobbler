@@ -107,7 +107,8 @@ WantedBy=multi-user.target
 UNIT
 
 # Required runtime dirs.
-mkdir -p /var/lib/tftpboot /var/log/cobbler/tasks /var/www/cobbler /var/lib/cobbler
+mkdir -p /var/lib/tftpboot /var/log/cobbler/tasks /var/www/cobbler /var/lib/cobbler \
+  /var/lib/cobbler/loaders /var/lib/cobbler/grub_config /srv/tftpboot
 
 # Apache: enable the modules Cobbler's WSGI/proxy config needs, plus its conf.
 a2enmod proxy proxy_http rewrite wsgi 2>/dev/null || true
@@ -159,8 +160,12 @@ fi
 echo "  - cobblerd is up: $(cobbler version 2>/dev/null)"
 
 # Stage PXE boot loaders + initial sync (now that the daemon is confirmed up).
-# Cobbler 3.3.x uses 'mkloaders' (the old 'get-loaders' was removed).
-cobbler mkloaders || echo "  (warn) cobbler mkloaders had issues"
+# Cobbler 3.3.x uses 'mkloaders' (the old 'get-loaders' was removed). It needs
+# its bootloader dirs to exist first, or it errors "Main bootloader directory
+# not found". BIOS PXE (pxelinux.0) works via sync even if mkloaders (UEFI grub)
+# has issues, so mkloaders is non-fatal.
+mkdir -p /var/lib/cobbler/loaders /var/lib/cobbler/grub_config
+cobbler mkloaders || echo "  (warn) cobbler mkloaders had issues (UEFI grub images) — BIOS PXE still works"
 cobbler sync || echo "  (warn) cobbler sync had issues"
 
 echo "=============================================================="
