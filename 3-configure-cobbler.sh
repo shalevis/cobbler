@@ -53,6 +53,13 @@ PUBKEY_FILE="$ROOT/config/ansible_id_ed25519.pub"
 LOCALADMIN_HASH="$(cat "$HASH_FILE")"
 ANSIBLE_PUBKEY="$(cat "$PUBKEY_FILE")"
 
+# Cobbler must be up, or every command below would silently no-op.
+if ! cobbler version >/dev/null 2>&1; then
+  echo "ERROR: cobblerd is not responding — run 2-install-offline.sh first." >&2
+  echo "       Check: systemctl status cobblerd ; cat /etc/cobbler/settings.yaml" >&2
+  exit 1
+fi
+
 # Secrets prompted at install (root-only). Empty if the feature is disabled.
 IPA_PASSWORD="$(cat "$ROOT/config/ipa_join.secret" 2>/dev/null || echo "")"
 CIFS_PASSWORD="$(cat "$ROOT/config/cifs.secret" 2>/dev/null || echo "")"
@@ -98,9 +105,16 @@ process_release() {
   local mnt="/mnt/$label"
   mkdir -p "$mnt"
   mount -o loop,ro "$iso" "$mnt" 2>/dev/null || true
-  cobbler import --name="$label" --path="$mnt" --arch=x86_64 \
-    --breed=ubuntu --os-version="$code" 2>/dev/null || \
-    echo "  (import may already exist; continuing)"
+  if cobbler distro list 2>/dev/null | grep -q "$label"; then
+    echo "  distro '$label' already imported — skipping import."
+  else
+    # Show the real error if import fails (do NOT hide it).
+    cobbler import --name="$label" --path="$mnt" --arch=x86_64 \
+      --breed=ubuntu --os-version="$code" || {
+        echo "  (warn) 'cobbler import' failed for $label." >&2
+        echo "         Desktop ISOs lack a standard install tree; import may not work." >&2
+      }
+  fi
 
   # 3) Render the autoinstall template for this release.
   local auto_dir="$WWW/autoinstall/$label"

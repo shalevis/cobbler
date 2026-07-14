@@ -76,30 +76,72 @@ fi
 echo "  - /etc/cobbler/settings.yaml is in place."
 
 echo "=============================================================="
-echo " STEP 3/5 — Enable services (Apache proxy, TFTP, Cobbler)"
+echo " STEP 3/5 — Wire up + start Cobbler services"
 echo "=============================================================="
-a2enmod proxy proxy_http rewrite 2>/dev/null || true
-a2enconf cobbler 2>/dev/null || true
-systemctl enable --now apache2 tftpd-hpa 2>/dev/null || true
-# Cobbler ships cobblerd + gunicorn services (relocated above).
-systemctl daemon-reload
-systemctl enable --now cobblerd 2>/dev/null || true
 
-# External DHCP/DNS: make sure Cobbler does NOT manage them.
+# The pip 'cobblerd' lands in /usr/local/bin, but the shipped systemd unit often
+# points at /usr/bin/cobblerd. Write a unit that uses the ACTUAL binary path.
+COBBLERD_BIN="$(command -v cobblerd || echo /usr/local/bin/cobblerd)"
+echo "  - cobblerd binary: $COBBLERD_BIN"
+cat > /etc/systemd/system/cobblerd.service <<UNIT
+[Unit]
+Description=Cobbler Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$COBBLERD_BIN -F
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# Required runtime dirs.
+mkdir -p /var/lib/tftpboot /var/log/cobbler /var/www/cobbler /var/lib/cobbler
+
+# Apache: enable the modules Cobbler's WSGI/proxy config needs, plus its conf.
+a2enmod proxy proxy_http rewrite wsgi 2>/dev/null || true
+a2enconf cobbler 2>/dev/null || true
+
+# External DHCP/DNS: Cobbler must NOT manage them; set server IPs.
 SETTINGS="/etc/cobbler/settings.yaml"
-if [[ -f "$SETTINGS" ]]; then
-  sed -i \
-    -e "s/^manage_dhcp:.*/manage_dhcp: 0/" \
-    -e "s/^manage_dhcp_v4:.*/manage_dhcp_v4: 0/" \
-    -e "s/^manage_dns:.*/manage_dns: 0/" \
-    -e "s/^manage_tftpd:.*/manage_tftpd: 1/" \
-    -e "s#^server:.*#server: $COBBLER_SERVER_IP#" \
-    -e "s#^next_server_v4:.*#next_server_v4: $COBBLER_SERVER_IP#" \
-    "$SETTINGS"
-  systemctl restart cobblerd 2>/dev/null || true
+sed -i \
+  -e "s/^manage_dhcp:.*/manage_dhcp: 0/" \
+  -e "s/^manage_dhcp_v4:.*/manage_dhcp_v4: 0/" \
+  -e "s/^manage_dns:.*/manage_dns: 0/" \
+  -e "s/^manage_tftpd:.*/manage_tftpd: 1/" \
+  -e "s#^server:.*#server: $COBBLER_SERVER_IP#" \
+  -e "s#^next_server_v4:.*#next_server_v4: $COBBLER_SERVER_IP#" \
+  "$SETTINGS"
+
+systemctl daemon-reload
+systemctl enable --now apache2 tftpd-hpa 2>/dev/null || true
+systemctl restart apache2 2>/dev/null || true
+systemctl enable cobblerd 2>/dev/null || true
+systemctl restart cobblerd
+
+# Verify cobblerd actually came up — retry, then fail loudly with diagnostics.
+echo "  - waiting for cobblerd to respond..."
+ok=0
+for i in $(seq 1 15); do
+  if cobbler version >/dev/null 2>&1; then ok=1; break; fi
+  sleep 2
+done
+if [[ "$ok" != "1" ]]; then
+  echo "ERROR: cobblerd did not come up. Diagnostics:" >&2
+  systemctl --no-pager -l status cobblerd 2>&1 | tail -20 >&2
+  echo "--- last cobbler log ---" >&2
+  journalctl -u cobblerd --no-pager -n 30 2>/dev/null >&2 || true
+  exit 1
 fi
-cobbler get-loaders 2>/dev/null || true
-cobbler sync 2>/dev/null || true
+echo "  - cobblerd is up: $(cobbler version 2>/dev/null)"
+
+# Stage PXE boot loaders + initial sync (now that the daemon is confirmed up).
+cobbler get-loaders || echo "  (warn) cobbler get-loaders had issues"
+cobbler sync || echo "  (warn) cobbler sync had issues"
 
 echo "=============================================================="
 echo " STEP 4/5 — Set the LOCAL ADMIN password (prompted, hashed)"
