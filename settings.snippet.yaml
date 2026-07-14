@@ -13,14 +13,16 @@ server: <SERVER_IP>
 next_server_v4: <SERVER_IP>
 
 # Do NOT let Cobbler manage DHCP — you already run your own DHCP server.
-manage_dhcp: 0
-manage_dhcp_v4: 0
+# NOTE: these MUST be YAML booleans (true/false), not 0/1 — Cobbler's schema
+# rejects integers ("0 should be instance of 'bool'").
+manage_dhcp: false
+manage_dhcp_v4: false
 
 # Do NOT let Cobbler manage DNS — you already run your own DNS server.
-manage_dns: 0
+manage_dns: false
 
 # Cobbler DOES manage TFTP (serves the PXE boot loaders + menus).
-manage_tftpd: 1
+manage_tftpd: true
 
 # Serve autoinstall files + repos over HTTP (Apache).
 manage_rsync: 0

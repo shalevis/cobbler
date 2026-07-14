@@ -99,22 +99,28 @@ process_release() {
       > "$prov/provision-sources.list"
   fi
 
-  # 2) Publish the ISO and import it into Cobbler.
-  mkdir -p "$WWW/isos"
+  # 2) Publish the ISO and extract its boot kernel/initrd. Modern Ubuntu ISOs
+  #    (Desktop AND live-server) use the casper/subiquity layout, which
+  #    'cobbler import' cannot ingest — so we register the distro MANUALLY and
+  #    boot the ISO over HTTP (casper fetches it via url=).
+  mkdir -p "$WWW/isos/$label"
   cp -f "$iso" "$WWW/isos/$label.iso"
   local mnt="/mnt/$label"
   mkdir -p "$mnt"
-  mount -o loop,ro "$iso" "$mnt" 2>/dev/null || true
-  if cobbler distro list 2>/dev/null | grep -q "$label"; then
-    echo "  distro '$label' already imported — skipping import."
-  else
-    # Show the real error if import fails (do NOT hide it).
-    cobbler import --name="$label" --path="$mnt" --arch=x86_64 \
-      --breed=ubuntu --os-version="$code" || {
-        echo "  (warn) 'cobbler import' failed for $label." >&2
-        echo "         Desktop ISOs lack a standard install tree; import may not work." >&2
-      }
+  mountpoint -q "$mnt" || mount -o loop,ro "$iso" "$mnt"
+
+  local kern initrd
+  kern="$(ls "$mnt"/casper/vmlinuz* 2>/dev/null | head -1)"
+  initrd="$(ls "$mnt"/casper/initrd* 2>/dev/null | head -1)"
+  if [[ -z "$kern" || -z "$initrd" ]]; then
+    echo "  ERROR: casper/vmlinuz + casper/initrd not found in $label ISO — cannot register." >&2
+    umount "$mnt" 2>/dev/null || true
+    return 0
   fi
+  cp -f "$kern"   "$WWW/isos/$label/vmlinuz"
+  cp -f "$initrd" "$WWW/isos/$label/initrd"
+  umount "$mnt" 2>/dev/null || true
+  echo "  extracted boot kernel/initrd from casper/"
 
   # 3) Render the autoinstall template for this release.
   local auto_dir="$WWW/autoinstall/$label"
@@ -160,18 +166,34 @@ process_release() {
       "$ROOT/autoinstall/pituah-postinstall.sh.tmpl" > "$pit_dir/pituah-postinstall.sh"
   chmod 0644 "$pit_dir/pituah-postinstall.sh"
 
-  # 4) Point the profile at the ISO + NoCloud autoinstall via kernel args.
-  local ks_url="http://$COBBLER_SERVER_IP/autoinstall/$label/"
+  # 4) Register the distro + profile MANUALLY (no import) with NoCloud autoinstall
+  #    kernel args. casper downloads the ISO via url=; subiquity reads autoinstall.
   local iso_url="http://$COBBLER_SERVER_IP/isos/$label.iso"
-  cobbler profile edit --name="${label}-x86_64" \
-    --kernel-options="ip=dhcp url=$iso_url autoinstall ds=nocloud-net;s=$ks_url" \
-    2>/dev/null || \
-  cobbler profile edit --name="$label" \
-    --kernel-options="ip=dhcp url=$iso_url autoinstall ds=nocloud-net;s=$ks_url" \
-    2>/dev/null || echo "  (set kernel options manually if the profile name differs)"
+  local ks_url="http://$COBBLER_SERVER_IP/autoinstall/$label/"
+  local kopts="ip=dhcp url=$iso_url autoinstall ds=nocloud-net;s=$ks_url"
+  local dname="${label}-x86_64"
 
-  umount "$mnt" 2>/dev/null || true
-  echo "  base autoinstall: $auto_dir/user-data  (OTP is per-host; use new-host.sh)"
+  if cobbler distro list 2>/dev/null | grep -q "$dname"; then
+    cobbler distro edit --name="$dname" \
+      --kernel="$WWW/isos/$label/vmlinuz" --initrd="$WWW/isos/$label/initrd" \
+      --arch=x86_64 --breed=ubuntu --os-version="$code" \
+      || echo "  (warn) distro edit failed for $dname"
+  else
+    cobbler distro add --name="$dname" \
+      --kernel="$WWW/isos/$label/vmlinuz" --initrd="$WWW/isos/$label/initrd" \
+      --arch=x86_64 --breed=ubuntu --os-version="$code" \
+      || echo "  (warn) distro add failed for $dname"
+  fi
+
+  if cobbler profile list 2>/dev/null | grep -q "$dname"; then
+    cobbler profile edit --name="$dname" --distro="$dname" \
+      --kernel-options="$kopts" || echo "  (warn) profile edit failed for $dname"
+  else
+    cobbler profile add --name="$dname" --distro="$dname" \
+      --kernel-options="$kopts" || echo "  (warn) profile add failed for $dname"
+  fi
+
+  echo "  distro/profile: $dname   autoinstall: $auto_dir/user-data"
 }
 
 process_release "$UBUNTU_2204_LABEL"  "$UBUNTU_2204_CODENAME"  "$UBUNTU_2204_LABEL.iso"
