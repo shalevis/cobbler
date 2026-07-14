@@ -107,7 +107,7 @@ WantedBy=multi-user.target
 UNIT
 
 # Required runtime dirs.
-mkdir -p /var/lib/tftpboot /var/log/cobbler /var/www/cobbler /var/lib/cobbler
+mkdir -p /var/lib/tftpboot /var/log/cobbler/tasks /var/www/cobbler /var/lib/cobbler
 
 # Apache: enable the modules Cobbler's WSGI/proxy config needs, plus its conf.
 a2enmod proxy proxy_http rewrite wsgi 2>/dev/null || true
@@ -126,6 +126,15 @@ sed -i \
   -e "s#^server:.*#server: $COBBLER_SERVER_IP#" \
   -e "s#^next_server_v4:.*#next_server_v4: $COBBLER_SERVER_IP#" \
   "$SETTINGS"
+
+# The 'cobbler' CLI connects to the API at the 'server' IP by default. If that IP
+# isn't locally reachable (e.g. placeholder, or before Apache proxy is wired) you
+# get 'No route to host'. Force the CLI to use 127.0.0.1 instead.
+if grep -q '^client_use_localhost:' "$SETTINGS"; then
+  sed -i 's/^client_use_localhost:.*/client_use_localhost: true/' "$SETTINGS"
+else
+  echo 'client_use_localhost: true' >> "$SETTINGS"
+fi
 
 systemctl daemon-reload
 systemctl enable --now apache2 tftpd-hpa 2>/dev/null || true
@@ -150,7 +159,8 @@ fi
 echo "  - cobblerd is up: $(cobbler version 2>/dev/null)"
 
 # Stage PXE boot loaders + initial sync (now that the daemon is confirmed up).
-cobbler get-loaders || echo "  (warn) cobbler get-loaders had issues"
+# Cobbler 3.3.x uses 'mkloaders' (the old 'get-loaders' was removed).
+cobbler mkloaders || echo "  (warn) cobbler mkloaders had issues"
 cobbler sync || echo "  (warn) cobbler sync had issues"
 
 echo "=============================================================="
